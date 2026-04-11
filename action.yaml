@@ -1,4 +1,4 @@
-name: 'Helm Chart Publish'
+name: 'Helm Chart Publisher for GitHub Pages'
 description: 'Package a Helm chart and publish it to a Helm repository hosted on GitHub Pages'
 branding:
   icon: 'package'
