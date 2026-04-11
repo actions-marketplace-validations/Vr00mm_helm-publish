@@ -54,18 +54,20 @@ runs:
     - name: Package Helm chart
       id: package
       shell: bash
+      env:
+        CHART_PATH: ${{ inputs.chart-path }}
+        VERSION: ${{ inputs.version }}
       run: |
         mkdir -p /tmp/helm-output
 
-        EXTRA_ARGS=""
-        if [ -n "${{ inputs.version }}" ]; then
-          EXTRA_ARGS="--version ${{ inputs.version }}"
+        if [ -n "$VERSION" ]; then
+          helm package "$CHART_PATH" --destination /tmp/helm-output --version "$VERSION"
+        else
+          helm package "$CHART_PATH" --destination /tmp/helm-output
         fi
 
-        helm package "${{ inputs.chart-path }}" --destination /tmp/helm-output $EXTRA_ARGS
-
         CHART_FILE=$(ls /tmp/helm-output/*.tgz | head -1)
-        echo "chart-package=$(basename $CHART_FILE)" >> $GITHUB_OUTPUT
+        echo "chart-package=$(basename "$CHART_FILE")" >> $GITHUB_OUTPUT
 
     - name: Checkout pages repo
       uses: actions/checkout@v6
@@ -77,21 +79,22 @@ runs:
 
     - name: Publish chart and update index
       shell: bash
+      env:
+        CHARTS_DIR_INPUT: ${{ inputs.charts-dir }}
+        INDEX_DIR_INPUT: ${{ inputs.index-dir }}
+        PAGES_URL: ${{ inputs.pages-url }}
       run: |
         # Resolve charts dir (where .tgz files live)
-        if [ "${{ inputs.charts-dir }}" = "." ]; then
+        if [ "$CHARTS_DIR_INPUT" = "." ]; then
           CHARTS_DIR="_pages"
-          CHARTS_URL="${{ inputs.pages-url }}"
+          CHARTS_URL="$PAGES_URL"
         else
-          CHARTS_DIR="_pages/${{ inputs.charts-dir }}"
-          CHARTS_URL="${{ inputs.pages-url }}/${{ inputs.charts-dir }}"
+          CHARTS_DIR="_pages/$CHARTS_DIR_INPUT"
+          CHARTS_URL="$PAGES_URL/$CHARTS_DIR_INPUT"
         fi
 
         # Resolve index dir (where index.yaml is written); defaults to charts-dir
-        INDEX_INPUT="${{ inputs.index-dir }}"
-        if [ -z "$INDEX_INPUT" ]; then
-          INDEX_INPUT="${{ inputs.charts-dir }}"
-        fi
+        INDEX_INPUT="${INDEX_DIR_INPUT:-$CHARTS_DIR_INPUT}"
         if [ "$INDEX_INPUT" = "." ]; then
           INDEX_DIR="_pages"
         else
@@ -116,17 +119,22 @@ runs:
     - name: Commit and push
       shell: bash
       working-directory: _pages
+      env:
+        CHARTS_DIR_INPUT: ${{ inputs.charts-dir }}
+        INDEX_DIR_INPUT: ${{ inputs.index-dir }}
+        CHART_PACKAGE: ${{ steps.package.outputs.chart-package }}
+        PAGES_BRANCH: ${{ inputs.pages-branch }}
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
 
-        git add "${{ inputs.charts-dir }}" "${{ inputs.index-dir || inputs.charts-dir }}"
+        git add "$CHARTS_DIR_INPUT" "${INDEX_DIR_INPUT:-$CHARTS_DIR_INPUT}"
         git diff --staged --quiet && echo "No changes to publish." && exit 0
 
-        git commit -m "chore: publish helm chart ${{ steps.package.outputs.chart-package }}"
+        git commit -m "chore: publish helm chart $CHART_PACKAGE"
 
         for i in 1 2 3; do
-          git pull --rebase origin ${{ inputs.pages-branch }} && git push && break
+          git pull --rebase origin "$PAGES_BRANCH" && git push && break
           echo "Push attempt $i failed, retrying in $((i * 5))s..."
           sleep $((i * 5))
         done
