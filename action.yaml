@@ -1,0 +1,132 @@
+name: 'Helm Chart Publish'
+description: 'Package a Helm chart and publish it to a Helm repository hosted on GitHub Pages'
+branding:
+  icon: 'package'
+  color: 'blue'
+
+inputs:
+  chart-path:
+    description: 'Path to the Helm chart directory (must contain Chart.yaml)'
+    required: true
+  version:
+    description: 'Chart version override. Defaults to the version defined in Chart.yaml.'
+    required: false
+    default: ''
+  token:
+    description: 'GitHub token with write access to the pages repository'
+    required: true
+  pages-repo:
+    description: 'Repository hosting the Helm repo (owner/repo), e.g. Vr00mm/vr00mm.github.io'
+    required: true
+  pages-branch:
+    description: 'Branch of the pages repository'
+    required: false
+    default: 'master'
+  charts-dir:
+    description: 'Subdirectory in the pages repo where .tgz files are stored. Use "." for root.'
+    required: false
+    default: '.'
+  index-dir:
+    description: |
+      Subdirectory in the pages repo where index.yaml is written. Use "." for root.
+      Defaults to charts-dir. Set to "." to keep index.yaml at root while charts
+      live in a subdirectory (e.g. charts-dir: charts, index-dir: .).
+    required: false
+    default: ''
+  pages-url:
+    description: |
+      Base URL of the GitHub Pages site.
+      For a user/org pages repo (owner.github.io): https://owner.github.io
+      For a project repo: https://owner.github.io/repo-name
+    required: true
+
+outputs:
+  chart-package:
+    description: 'Filename of the packaged .tgz chart'
+    value: ${{ steps.package.outputs.chart-package }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Helm
+      uses: azure/setup-helm@v5
+
+    - name: Package Helm chart
+      id: package
+      shell: bash
+      run: |
+        mkdir -p /tmp/helm-output
+
+        EXTRA_ARGS=""
+        if [ -n "${{ inputs.version }}" ]; then
+          EXTRA_ARGS="--version ${{ inputs.version }}"
+        fi
+
+        helm package "${{ inputs.chart-path }}" --destination /tmp/helm-output $EXTRA_ARGS
+
+        CHART_FILE=$(ls /tmp/helm-output/*.tgz | head -1)
+        echo "chart-package=$(basename $CHART_FILE)" >> $GITHUB_OUTPUT
+
+    - name: Checkout pages repo
+      uses: actions/checkout@v6
+      with:
+        repository: ${{ inputs.pages-repo }}
+        ref: ${{ inputs.pages-branch }}
+        token: ${{ inputs.token }}
+        path: _pages
+
+    - name: Publish chart and update index
+      shell: bash
+      run: |
+        # Resolve charts dir (where .tgz files live)
+        if [ "${{ inputs.charts-dir }}" = "." ]; then
+          CHARTS_DIR="_pages"
+          CHARTS_URL="${{ inputs.pages-url }}"
+        else
+          CHARTS_DIR="_pages/${{ inputs.charts-dir }}"
+          CHARTS_URL="${{ inputs.pages-url }}/${{ inputs.charts-dir }}"
+        fi
+
+        # Resolve index dir (where index.yaml is written); defaults to charts-dir
+        INDEX_INPUT="${{ inputs.index-dir }}"
+        if [ -z "$INDEX_INPUT" ]; then
+          INDEX_INPUT="${{ inputs.charts-dir }}"
+        fi
+        if [ "$INDEX_INPUT" = "." ]; then
+          INDEX_DIR="_pages"
+        else
+          INDEX_DIR="_pages/$INDEX_INPUT"
+        fi
+
+        mkdir -p "$CHARTS_DIR" "$INDEX_DIR"
+        cp /tmp/helm-output/*.tgz "$CHARTS_DIR/"
+
+        # Generate index.yaml in charts dir, merging with existing index in index dir
+        if [ -f "$INDEX_DIR/index.yaml" ]; then
+          helm repo index "$CHARTS_DIR" --url "$CHARTS_URL" --merge "$INDEX_DIR/index.yaml"
+        else
+          helm repo index "$CHARTS_DIR" --url "$CHARTS_URL"
+        fi
+
+        # Move index.yaml to index dir if they differ
+        if [ "$CHARTS_DIR" != "$INDEX_DIR" ]; then
+          mv "$CHARTS_DIR/index.yaml" "$INDEX_DIR/index.yaml"
+        fi
+
+    - name: Commit and push
+      shell: bash
+      working-directory: _pages
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        git add "${{ inputs.charts-dir }}" "${{ inputs.index-dir || inputs.charts-dir }}"
+        git diff --staged --quiet && echo "No changes to publish." && exit 0
+
+        git commit -m "chore: publish helm chart ${{ steps.package.outputs.chart-package }}"
+
+        for i in 1 2 3; do
+          git pull --rebase origin ${{ inputs.pages-branch }} && git push && break
+          echo "Push attempt $i failed, retrying in $((i * 5))s..."
+          sleep $((i * 5))
+        done
